@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use cw_storage_plus::{Item,Map};
 
 pub const CONFIG: Item<State> = Item::new("config_state");
+pub const MEMBERS : Item<Vec<UserInfo>> = Item::new("config_members");
 pub const OFFERINGS: Map<&str, Offering> = Map::new("offerings");
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -11,7 +12,8 @@ pub struct State {
     pub owner:String,
     pub token_address:String,
     pub nft_address:String,
-    pub offering_id:u64
+    pub offering_id:u64,
+    pub royalty_portion:Decimal
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug)]

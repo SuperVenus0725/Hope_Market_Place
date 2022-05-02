@@ -9,7 +9,7 @@ use cw721::{Cw721ReceiveMsg, Cw721ExecuteMsg};
 
 use crate::error::{ContractError};
 use crate::msg::{ ExecuteMsg, InstantiateMsg, QueryMsg,SellNft, BuyNft};
-use crate::state::{State,CONFIG,Offering, OFFERINGS,Asset,UserInfo};
+use crate::state::{State,CONFIG,Offering, OFFERINGS,Asset,UserInfo, MEMBERS};
 use crate::package::{OfferingsResponse,QueryOfferingsResult};
 use std::str::from_utf8;
 
@@ -21,14 +21,15 @@ pub fn instantiate(
     deps: DepsMut,
     _env: Env,
     info: MessageInfo,
-    _msg: InstantiateMsg,
+    msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     let state = State {
         owner:info.sender.to_string(),
         token_address:String::from("token_address"),
         nft_address :String::from("nft_address"),
-        offering_id:0
+        offering_id:0,
+        royalty_portion:msg.royalty_portion
     };
     CONFIG.save(deps.storage,&state)?;
     Ok(Response::default())
@@ -46,6 +47,7 @@ pub fn execute(
     ExecuteMsg::Receive(msg) =>execute_receive(deps,env,info,msg),
     ExecuteMsg::BuyNft { offering_id } =>execute_buy_nft(deps,env,info,offering_id),
     ExecuteMsg::SetAdminsList { members } => execute_set_members(deps,env,info,members),
+    ExecuteMsg::ChangeRoyaltyPortion { royalty_portion } => execute_change_royalty(deps,env,info,royalty_portion),
     ExecuteMsg::WithdrawNft { offering_id } => execute_withdraw(deps,env,info,offering_id),
     ExecuteMsg::SetTokenAddress {address} => execute_token_address(deps,env,info,address),
     ExecuteMsg::SetNftAddress { address } =>execute_nft_address(deps,env,info,address),
@@ -111,7 +113,18 @@ fn execute_receive(
     }
 
     OFFERINGS.remove( deps.storage, &msg.offering_id);
-
+    let members = MEMBERS.load(deps.storage)?;
+    
+    let mut messages:Vec<CosmosMsg> = vec![];
+    for user in members{
+        messages.push(CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: state.token_address.to_string(),
+                funds: vec![],
+                msg: to_binary(&Cw20ExecuteMsg::Transfer { 
+                    recipient: user.address.clone(), 
+                    amount: rcv_msg.amount*state.royalty_portion*user.portion })?,
+        }))
+    }
 
     Ok(Response::new()
         .add_message(CosmosMsg::Wasm(WasmMsg::Execute {
@@ -127,8 +140,9 @@ fn execute_receive(
                 funds: vec![],
                 msg: to_binary(&Cw20ExecuteMsg::Transfer { 
                     recipient: off.seller, 
-                    amount: rcv_msg.amount })?,
+                    amount: rcv_msg.amount*(Decimal::one()-state.royalty_portion) })?,
         }))
+        .add_messages(messages)
 )
 }
 
@@ -155,7 +169,19 @@ fn execute_buy_nft(
     }
 
     OFFERINGS.remove( deps.storage, &offering_id);
-
+    
+    let members = MEMBERS.load(deps.storage)?;
+    
+    let mut messages:Vec<CosmosMsg> = vec![];
+    for user in members{
+        messages.push(CosmosMsg::Bank(BankMsg::Send {
+                to_address: user.address,
+                amount:vec![Coin{
+                    denom:off.clone().list_price.denom,
+                    amount:amount*state.royalty_portion*user.portion
+                }]
+        }))
+    }
 
     Ok(Response::new()
         .add_message(CosmosMsg::Wasm(WasmMsg::Execute {
@@ -170,9 +196,10 @@ fn execute_buy_nft(
                 to_address: off.seller,
                 amount:vec![Coin{
                     denom:off.list_price.denom,
-                    amount:amount
+                    amount:amount*(Decimal::one()-state.royalty_portion)
                 }]
         }))
+        .add_messages(messages)
 )
 }
 
@@ -186,7 +213,6 @@ fn execute_withdraw(
     let state = CONFIG.load(deps.storage)?;
 
     if off.seller == info.sender.to_string(){
-      
         OFFERINGS.remove(deps.storage,&offering_id);
         Ok(Response::new()
             .add_message(CosmosMsg::Wasm(WasmMsg::Execute {
@@ -206,11 +232,46 @@ fn execute_withdraw(
 }
 
 fn execute_set_members(
-     deps: DepsMut,
+    deps: DepsMut,
     _env:Env,
     info: MessageInfo,
     members: Vec<UserInfo>,
 )->Result<Response,ContractError>{
+
+    let state = CONFIG.load(deps.storage)?;
+
+    if info.sender.to_string() != state.owner{
+        return Err(ContractError::Unauthorized {});
+    }
+    
+    let mut sum_portion = Decimal::zero();
+
+    for item in members.clone() {
+        sum_portion = sum_portion + item.portion;
+        deps.api.addr_validate(&item.address)?;
+    }
+
+    if sum_portion != Decimal::one(){
+        return Err(ContractError::WrongPortionError { })
+    }
+
+    MEMBERS.save(deps.storage, &members)?;
+    Ok(Response::default())
+}
+
+fn execute_change_royalty(
+     deps: DepsMut,
+    _env:Env,
+    info: MessageInfo,
+    royalty_potion: Decimal,
+)->Result<Response,ContractError>{
+    let mut state = CONFIG.load(deps.storage)?;    
+    if info.sender.to_string() != state.owner{
+        return Err(ContractError::Unauthorized {});
+    }
+
+    state.royalty_portion = royalty_potion;
+    CONFIG.save(deps.storage, &state)?;
     Ok(Response::default())
 }
 
@@ -275,13 +336,19 @@ fn execute_change_owner(
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetStateInfo {} => to_binary(&query_state_info(deps)?),
-        QueryMsg::GetOfferings { }=> to_binary(&query_get_offerings(deps)?)
+        QueryMsg::GetOfferings {} => to_binary(&query_get_offerings(deps)?),
+        QueryMsg::GetMembers {} => to_binary(&query_get_members(deps)?)
     }
 }
 
 pub fn query_state_info(deps:Deps) -> StdResult<State>{
     let state =  CONFIG.load(deps.storage)?;
     Ok(state)
+}
+
+pub fn query_get_members(deps:Deps) -> StdResult<Vec<UserInfo>>{
+    let members = MEMBERS.load(deps.storage)?;
+    Ok(members)
 }
 
 pub fn query_get_offerings(deps:Deps) -> StdResult<OfferingsResponse>{
@@ -320,21 +387,52 @@ mod tests {
         //Instantiate
         let mut deps = mock_dependencies(&[]);
         let instantiate_msg = InstantiateMsg {
+            royalty_portion:Decimal::from_ratio(2 as u128, 100 as u128)
         };
         let info = mock_info("creator", &[]);
         let res = instantiate(deps.as_mut(), mock_env(), info, instantiate_msg).unwrap();
         assert_eq!(0, res.messages.len());
         let state = query_state_info(deps.as_ref()).unwrap();
         assert_eq!(state.owner,"creator".to_string());
+        assert_eq!(state.royalty_portion,Decimal::from_ratio(2 as u128, 100 as u128));
 
         //Change Owner
 
         let info = mock_info("creator", &[]);
         let msg = ExecuteMsg::ChangeOwner { address:"owner".to_string()};
         execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-         let state = query_state_info(deps.as_ref()).unwrap();
+        let state = query_state_info(deps.as_ref()).unwrap();
         assert_eq!(state.owner,"owner".to_string());
 
+        //Set Members
+
+        let info = mock_info("owner", &[]);
+        let msg = ExecuteMsg::SetAdminsList { members: vec![UserInfo{
+            address:"admin1".to_string(),
+            portion:Decimal::from_ratio(3 as u128, 10 as u128)
+        },UserInfo{
+            address:"admin2".to_string(),
+            portion:Decimal::from_ratio(7 as u128, 10 as u128)
+        }] }; 
+        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        let members = query_get_members(deps.as_ref()).unwrap();
+        assert_eq!(members, vec![UserInfo{
+            address:"admin1".to_string(),
+            portion:Decimal::from_ratio(3 as u128, 10 as u128)
+        },UserInfo{
+            address:"admin2".to_string(),
+            portion:Decimal::from_ratio(7 as u128, 10 as u128)
+        }]);
+     
+        //Chage Portion
+
+        let info = mock_info("owner", &[]);
+        let msg = ExecuteMsg::ChangeRoyaltyPortion { royalty_portion: Decimal::from_ratio(3 as u128, 100 as u128) };
+        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+        let state = query_state_info(deps.as_ref()).unwrap();
+        assert_eq!(state.royalty_portion,Decimal::from_ratio(3 as u128, 100 as u128));
+        
         //Change Token Contract Address
 
         let info = mock_info("owner", &[]);
@@ -480,11 +578,11 @@ mod tests {
         let info = mock_info("token_address1", &[]);
         let msg = ExecuteMsg::Receive(Cw20ReceiveMsg{
             sender:"buyer".to_string(),
-            amount:Uint128::new(10),
+            amount:Uint128::new(1000),
             msg:to_binary(&cw20_msg).unwrap()
         });
         let res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
-        assert_eq!(2,res.messages.len());
+        assert_eq!(4,res.messages.len());
         assert_eq!(res.messages[0].msg, CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr: "nft_address1".to_string(),
             funds: vec![],
@@ -493,12 +591,31 @@ mod tests {
                     token_id: "Hope.3".to_string(),
             }).unwrap(),
         }));
-         assert_eq!(res.messages[1].msg, CosmosMsg::Wasm(WasmMsg::Execute {
+        assert_eq!(res.messages[1].msg, CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr: "token_address1".to_string(),
             funds: vec![],
             msg: to_binary(&Cw20ExecuteMsg::Transfer {
                     recipient: "owner3".to_string(),
-                    amount:Uint128::new(10)
+                    amount:Uint128::new(970)
+            }).unwrap(),
+        }));
+
+        assert_eq!(res.messages[2].msg.clone(), CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: "token_address1".to_string(),
+            funds: vec![],
+            msg: to_binary(&Cw20ExecuteMsg::Transfer {
+                    recipient: "admin1".to_string(),
+                    amount:Uint128::new(9)
+            }).unwrap(),
+        }));
+
+
+        assert_eq!(res.messages[3].msg, CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: "token_address1".to_string(),
+            funds: vec![],
+            msg: to_binary(&Cw20ExecuteMsg::Transfer {
+                    recipient: "admin2".to_string(),
+                    amount:Uint128::new(21)
             }).unwrap(),
         }));
 
@@ -521,11 +638,11 @@ mod tests {
 
         let info = mock_info("buyer2", &[Coin{
             denom:"ujuno".to_string(),
-            amount:Uint128::new(2)
+            amount:Uint128::new(1000)
         }]);
         let msg = ExecuteMsg::BuyNft { offering_id: "2".to_string() };
         let res = execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
-        assert_eq!(res.messages.len(),2);
+        assert_eq!(res.messages.len(),4);
         assert_eq!(res.messages[0].msg,CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr: state.nft_address.to_string(),
                 funds: vec![],
@@ -538,7 +655,21 @@ mod tests {
                 to_address: "owner2".to_string(),
                 amount:vec![Coin{
                     denom:"ujuno".to_string(),
-                    amount:Uint128::new(2)
+                    amount:Uint128::new(970)
+                }]
+        }));
+        assert_eq!(res.messages[2].msg,CosmosMsg::Bank(BankMsg::Send {
+                to_address: "admin1".to_string(),
+                amount:vec![Coin{
+                    denom:"ujuno".to_string(),
+                    amount:Uint128::new(9)
+                }]
+        }));
+        assert_eq!(res.messages[3].msg,CosmosMsg::Bank(BankMsg::Send {
+                to_address: "admin2".to_string(),
+                amount:vec![Coin{
+                    denom:"ujuno".to_string(),
+                    amount:Uint128::new(21)
                 }]
         }));
 

@@ -9,7 +9,7 @@ use cw721::Cw721ReceiveMsg;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InstantiateMsg {
-
+    pub royalty_portion:Decimal
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -18,6 +18,7 @@ pub enum ExecuteMsg {
  ReceiveNft(Cw721ReceiveMsg),
  Receive(Cw20ReceiveMsg),
  SetAdminsList{members:Vec<UserInfo>},
+ ChangeRoyaltyPortion{royalty_portion:Decimal},
  BuyNft{offering_id:String},
  WithdrawNft{offering_id:String},
  ChangeOwner{address:String},
@@ -30,7 +31,8 @@ pub enum ExecuteMsg {
 pub enum QueryMsg {
     /// Returns a human-readable representation of the arbiter.
     GetStateInfo {},
-    GetOfferings{}
+    GetOfferings{},
+    GetMembers{}
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
